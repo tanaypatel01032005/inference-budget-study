@@ -1,0 +1,398 @@
+================================================================================
+                           SHESHNAG OPERATOR HANDOFF
+================================================================================
+Project: Inference Budget Study
+Research Topic: Inference-time computation vs. reasoning quality:
+                How many sampled generations are enough?
+Target Platform: University Sheshnag Batch Inference Service (OpenAI-compatible)
+Date: October 2026
+
+================================================================================
+ONLY CHANGE THESE ITEMS
+================================================================================
+No source-code modification is required.
+Only the .env file must be created and edited.
+
+You only need to supply these 3 variables in `.env`:
+  1. SHESHNAG_BASE_URL  (Deployment base URL ending in /v1)
+  2. SHESHNAG_API_KEY   (Your university API key / bearer token)
+  3. SHESHNAG_MODEL_ID  (Live model ID from GET /v1/models)
+
+All hyperparameters, prompts, dataset sampling seeds, and budget allocations
+are fixed and pre-configured. Do NOT alter any other file.
+
+================================================================================
+REQUIRED SECTION 1 — SHESHNAG INFORMATION TO COLLECT
+================================================================================
+Before running any script tomorrow, obtain these three items:
+
+  1. Sheshnag deployment URL
+     Example: https://sheshnag.university.edu/v1
+     (Note: Ensure it ends in /v1 with NO trailing slash)
+
+  2. Personal Sheshnag API key
+     Example: sk-sheshnag-xxxxxxxxxxxxxxxxxxxx
+
+  3. Available model ID
+     Do NOT guess or hardcode a model ID.
+     Query the live endpoint using `python scripts/submit_sheshnag.py --check-models`
+     (or curl) and pick an available chat/reasoning model (e.g., Llama-3-8B-Instruct,
+     Qwen-2.5-Math-7B, Mistral-7B, etc.).
+
+================================================================================
+REQUIRED SECTION 2 & 3 — EXACT FILES, LINE NUMBERS, AND PLACEHOLDERS TO EDIT
+================================================================================
+Step A: Copy the template to create your `.env` file:
+  PowerShell:  copy .env.example .env
+  Linux/macOS: cp .env.example .env
+
+Step B: Open `.env` in any text editor.
+The exact line numbers and placeholders in `.env` (copied from `.env.example`) are:
+
+--------------------------------------------------------------------------------
+File: .env
+Line 5:
+Current Placeholder:
+SHESHNAG_BASE_URL=https://REPLACE_WITH_DEPLOYMENT/v1
+
+Replace With:
+SHESHNAG_BASE_URL=https://<your-actual-sheshnag-host>/v1
+--------------------------------------------------------------------------------
+File: .env
+Line 6:
+Current Placeholder:
+SHESHNAG_API_KEY=REPLACE_WITH_API_KEY
+
+Replace With:
+SHESHNAG_API_KEY=<your-actual-api-key>
+--------------------------------------------------------------------------------
+File: .env
+Line 7:
+Current Placeholder:
+SHESHNAG_MODEL_ID=REPLACE_WITH_MODEL_ID
+
+Replace With:
+SHESHNAG_MODEL_ID=<selected-model-id-from-GET-/v1/models>
+--------------------------------------------------------------------------------
+
+Notice:
+No source-code modification is required.
+Only .env must be edited.
+
+================================================================================
+REQUIRED SECTION 4 — HOW TO CHECK THE AVAILABLE MODELS
+================================================================================
+Once you have filled in `SHESHNAG_BASE_URL` and `SHESHNAG_API_KEY` in `.env`:
+
+Run the project helper:
+  python scripts/submit_sheshnag.py --check-models
+
+Or via curl in PowerShell:
+  curl.exe -H "Authorization: Bearer $env:SHESHNAG_API_KEY" "$env:SHESHNAG_BASE_URL/models"
+
+Or curl in bash:
+  curl -H "Authorization: Bearer ${SHESHNAG_API_KEY}" "${SHESHNAG_BASE_URL}/models"
+
+Inspect the output list of model IDs. Select one suitable model ID for the
+experiment, and write that ID into Line 7 of `.env`:
+  SHESHNAG_MODEL_ID=<chosen-model-id>
+
+================================================================================
+REQUIRED SECTION 5 — EXACT RUN ORDER
+================================================================================
+Follow these steps in strict sequence:
+
+STEP 1 — Activate Python environment
+  .\venv\Scripts\activate
+  (or: source venv/bin/activate on Linux/macOS)
+
+STEP 2 — Configure `.env`
+  copy .env.example .env
+  (edit Line 5, 6, 7 with live credentials as shown above)
+
+STEP 3 — Verify Sheshnag connection & check models
+  python scripts/submit_sheshnag.py --check-models
+
+STEP 4 — Update `SHESHNAG_MODEL_ID` in `.env` with the chosen model ID
+
+STEP 5 — Verify dataset presence (already generated; if needed: python scripts/download_dataset.py)
+
+STEP 6 — Generate the Sheshnag JSONL batch (50,000 requests)
+  python scripts/create_batch.py
+
+STEP 7 — Validate the 50,000-request batch
+  python scripts/validate_batch.py
+
+STEP 8 — Submit batch to Sheshnag
+  python scripts/submit_sheshnag.py
+  (This uploads the file, registers the batch, prints the BATCH ID, and polls until completion)
+
+  *Alternative if you do not want to keep the terminal open while polling:*
+  python scripts/submit_sheshnag.py --no-poll
+
+STEP 9 — Monitor batch status (if using async / non-blocking mode)
+  python scripts/submit_sheshnag.py --status <BATCH_ID>
+
+STEP 10 — Download completed results (done automatically by submit script, or manually via):
+  python scripts/download_results.py
+
+STEP 11 — Parse and evaluate results
+  python scripts/evaluate.py
+
+STEP 12 — Generate final plots, confidence intervals, and summary report
+  python scripts/analyze.py
+
+================================================================================
+REQUIRED SECTION 6 — BATCH SIZE CHECK
+================================================================================
+Verify the scale before submitting:
+  1,000 questions (GSM8K test split sample)
+  ×
+  50 independent generations per question
+  =
+  50,000 total batch requests
+
+Command to verify:
+  python scripts/validate_batch.py
+
+Output must state:
+  VALIDATION PASSED
+  Total requests: 50000
+  Expected:       50000
+  Questions:      1000
+  Gens/question:  50
+
+CRITICAL ARCHITECTURAL NOTE:
+The batch consists of 50 separate JSONL requests for each question.
+It does NOT use `n=50` or `n > 1` in API requests because Sheshnag's Ollama
+backend explicitly rejects `n > 1`. Each line has a unique custom ID:
+  gsm8k_q000001_g0001
+  ...
+  gsm8k_q001000_g0050
+
+================================================================================
+REQUIRED SECTION 7 — SUBMISSION COMMAND
+================================================================================
+Command:
+  python scripts/submit_sheshnag.py
+
+What this does:
+  - Validates credentials from `.env`
+  - Verifies that the configured model exists on the deployment
+  - Uploads `batch/generated/sheshnag_batch.jsonl`
+  - Creates the batch job with endpoint `/v1/chat/completions` and window `24h`
+  - Automatically records batch metadata into `batch/results/batch_info.json`:
+    {
+      "batch_id": "<batch_id>",
+      "file_id": "<file_id>",
+      "model_id": "<model_id>",
+      "batch_file": "..."
+    }
+  - Begins status polling every 30 seconds
+
+What success looks like:
+  Verifying model '<model_id>'...
+  Model '<model_id>' is available.
+  Uploading batch file: batch/generated/sheshnag_batch.jsonl
+  Uploaded batch file. File ID: file-xxxxxx
+  Creating batch job...
+  Created batch. Batch ID: batch_xxxxxx
+  Status: validating
+  Batch info saved to: batch/results/batch_info.json
+  BATCH ID: batch_xxxxxx
+  Polling for completion (interval: 30s)...
+
+Record the BATCH ID in your notes immediately!
+
+================================================================================
+REQUIRED SECTION 8 — MONITORING & STATUS CODES
+================================================================================
+During polling, you will observe the standard OpenAI Batch lifecycle:
+
+  1. `validating`
+     Sheshnag is verifying JSON syntax, token limits, and schema.
+     This is NORMAL and not an error.
+
+  2. `validated`
+     Batch passed pre-flight checks and is queued in the job scheduler waiting
+     for GPU worker capacity. This is NORMAL.
+
+  3. `in_progress`
+     GPU workers are actively executing completions.
+
+  4. `completed`
+     All completions finished successfully. Results are ready to download.
+
+  5. `failed`
+     Job failed. Check `batch/results/batch_info.json` and terminal log.
+     Do not spam resubmissions; see Troubleshooting below.
+
+Check status on demand anytime:
+  python scripts/submit_sheshnag.py --status <BATCH_ID>
+
+================================================================================
+REQUIRED SECTION 9 — RESULT DOWNLOAD
+================================================================================
+If `submit_sheshnag.py` ran with polling enabled, it downloads results automatically.
+
+To download manually or re-download:
+  python scripts/download_results.py
+
+Target file path:
+  results/raw/sheshnag_results.jsonl
+
+CRITICAL WARNING:
+  DO NOT MODIFY OR DELETE THE RAW RESULTS FILE.
+  Raw results are the immutable primary experimental record.
+  Downstream scripts only read from this file.
+
+================================================================================
+REQUIRED SECTION 10 — EVALUATION
+================================================================================
+Command:
+  python scripts/evaluate.py
+
+What this does:
+  1. Parses raw JSONL model completions (`FINAL_ANSWER:`, `####`, `\boxed{}`)
+  2. Normalizes numerical answers (stripping commas, currency symbols, trailing units/zeros)
+  3. Saves parsed table to `results/parsed/generations.csv`
+  4. For every question, deterministically shuffles the 50 generations using seed (42 + question_id)
+  5. Evaluates plurality/majority voting at each budget:
+     N = 1, N = 3, N = 5, N = 10, N = 20, N = 50
+  6. Compares voted answer against the gold ground truth
+  7. Outputs wide and long evaluation tables to `results/final/`
+  8. Prints the accuracy table directly to the console
+
+Notice: No additional Sheshnag runs are needed for N=1,3,5,10,20,50.
+All inference budgets are derived locally from the single 50-generation pool.
+
+================================================================================
+REQUIRED SECTION 11 — FINAL ANALYSIS & FIGURE GENERATION
+================================================================================
+Command:
+  python scripts/analyze.py
+
+What this does:
+  1. Calculates 95% bootstrap confidence intervals (10,000 question-level resamples)
+  2. Computes marginal accuracy gains between successive N values:
+     Δ(3)  = Accuracy(3)  - Accuracy(1)
+     Δ(5)  = Accuracy(5)  - Accuracy(3)
+     Δ(10) = Accuracy(10) - Accuracy(5)
+     Δ(20) = Accuracy(20) - Accuracy(10)
+     Δ(50) = Accuracy(50) - Accuracy(20)
+  3. Computes gain per additional generation to pinpoint diminishing returns
+  4. Generates 3 publication-quality figures:
+     - results/analysis/figures/accuracy_vs_generations.png
+     - results/analysis/figures/marginal_gain.png
+     - results/analysis/figures/accuracy_vs_budget.png
+  5. Saves summary tables to:
+     - results/analysis/summary.csv
+     - results/analysis/summary.json
+     - results/analysis/marginal_gains.csv
+  6. Automatically updates `reports/results_summary.md` with final numbers
+
+================================================================================
+REQUIRED SECTION 12 — EXPECTED OUTPUT ARTIFACTS
+================================================================================
+After completing the run, verify that these artifacts exist:
+
+1. Dataset & Prompts:
+   - data/processed/gsm8k_test_1000.csv  (1,000 questions)
+   - data/metadata/dataset_metadata.json (seed=42 metadata)
+   - prompts/math_reasoning.txt
+
+2. Batch Generation:
+   - batch/generated/sheshnag_batch.jsonl (50,000 JSONL requests)
+   - batch/results/batch_info.json (batch ID, file ID metadata)
+
+3. Raw & Parsed Results:
+   - results/raw/sheshnag_results.jsonl (raw API outputs)
+   - results/parsed/generations.csv (parsed model answers + extraction methods)
+
+4. Final Evaluation:
+   - results/final/evaluation.csv (wide table with answer_N* and correct_N*)
+   - results/final/evaluation_long.csv (long table with question_id, N, correct)
+
+5. Analysis & Visualizations:
+   - results/analysis/summary.csv (accuracy per N with 95% CI)
+   - results/analysis/summary.json (machine-readable metrics)
+   - results/analysis/marginal_gains.csv (stepwise delta accuracy)
+   - results/analysis/figures/accuracy_vs_generations.png
+   - results/analysis/figures/marginal_gain.png
+   - results/analysis/figures/accuracy_vs_budget.png
+   - reports/results_summary.md (populated summary report)
+
+================================================================================
+REQUIRED SECTION 13 — TROUBLESHOOTING
+================================================================================
+
+Problem: "Invalid API key" / Authentication Error (401)
+  Check:
+  - Verify `SHESHNAG_API_KEY` in `.env` has no leading/trailing spaces or quotes.
+  - Verify that the API key was not copied with line breaks.
+  - Run `python scripts/submit_sheshnag.py --check-models` to test auth independently.
+
+Problem: "Connection refused" / Wrong Base URL (404/ECONNREFUSED)
+  Check:
+  - Verify `SHESHNAG_BASE_URL` in `.env` includes `https://` and ends in `/v1`.
+  - Ensure there is NO trailing slash after `/v1`.
+  - Example of correct URL: `https://sheshnag.university.edu/v1`
+  - Example of incorrect URL: `https://sheshnag.university.edu/v1/`
+
+Problem: "Model not found" (404)
+  Check:
+  - Run `python scripts/submit_sheshnag.py --check-models`.
+  - Copy the exact string ID of one of the listed models into `SHESHNAG_MODEL_ID` in `.env`.
+  - Do NOT invent or guess model names.
+
+Problem: Batch file validation fails
+  Check:
+  - Run `python scripts/validate_batch.py`.
+  - Read the numbered error list. Common causes:
+    * Batch file was generated with a placeholder model ID.
+    * Re-run `python scripts/create_batch.py` after updating `.env`.
+
+Problem: Batch remains in `validated` for a prolonged period
+  Explanation:
+  - `validated` means your 50,000-line request passed schema checks and is
+    waiting in the university cluster's queue for available GPU nodes.
+  - This is expected behavior during peak cluster usage. Do NOT cancel or resubmit.
+
+Problem: Batch status becomes `failed`
+  Check:
+  - Check error details: if available, `sheshnag_errors.jsonl` will be saved in `results/raw/`.
+  - Check cluster GPU status or contact the cluster admin with the BATCH ID.
+  - Do NOT resubmit immediately without identifying the failure reason.
+
+Problem: Missing results file after job completion
+  Check:
+  - Run `python scripts/download_results.py --batch-id <BATCH_ID>` explicitly.
+
+================================================================================
+REQUIRED SECTION 15 — OPERATOR SAFETY CHECKLIST
+================================================================================
+Mark each item before and after running tomorrow:
+
+Before Submission:
+  [ ] `.env` created from `.env.example`
+  [ ] `SHESHNAG_BASE_URL` entered and verified
+  [ ] `SHESHNAG_API_KEY` entered and verified
+  [ ] `python scripts/submit_sheshnag.py --check-models` successfully connects
+  [ ] `SHESHNAG_MODEL_ID` matches a live catalogue model ID
+  [ ] Verified `.env` is NOT committed to Git (`git status` shows `.env` ignored)
+  [ ] `data/processed/gsm8k_test_1000.csv` contains exactly 1,000 questions
+  [ ] Batch created via `python scripts/create_batch.py`
+  [ ] Batch validated via `python scripts/validate_batch.py` (50,000 requests confirmed)
+
+After Submission:
+  [ ] Batch submitted via `python scripts/submit_sheshnag.py`
+  [ ] BATCH ID saved in `batch/results/batch_info.json` and noted down
+  [ ] Polled until status reached `completed`
+  [ ] Raw results downloaded to `results/raw/sheshnag_results.jsonl`
+  [ ] Raw results preserved unmodified
+  [ ] `python scripts/evaluate.py` executed successfully
+  [ ] `python scripts/analyze.py` executed successfully
+  [ ] All 3 plots verified in `results/analysis/figures/`
+  [ ] Results inspected in `reports/results_summary.md`
+================================================================================
+

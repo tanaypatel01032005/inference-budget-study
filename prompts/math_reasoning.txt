@@ -1,0 +1,10 @@
+Solve the following mathematical word problem carefully.
+
+Show your reasoning clearly and then provide the final numerical answer.
+
+At the very end of your response, output the final answer in exactly this format:
+
+FINAL_ANSWER: <answer>
+
+Problem:
+{question}
