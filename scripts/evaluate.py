@@ -30,6 +30,12 @@ def main():
         default=None,
         help="Path to raw results JSONL file.",
     )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        default=False,
+        help="Allow incomplete results instead of raising IncompleteResultsError.",
+    )
     args = parser.parse_args()
     
     config = load_config()
@@ -68,7 +74,9 @@ def main():
     
     # Run evaluation
     print(f"\nRunning evaluation...")
-    wide_df, long_df = run_evaluation(generations, dataset, config)
+    wide_df, long_df = run_evaluation(
+        generations, dataset, config, allow_incomplete=args.allow_incomplete
+    )
     
     # Save results
     final_path = resolve_path(config["paths"]["results_final"])

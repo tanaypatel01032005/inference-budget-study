@@ -1,6 +1,8 @@
 """Batch JSONL generation for Sheshnag API."""
 
 import json
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -51,7 +53,7 @@ def generate_batch_jsonl(
 ) -> Path:
     """Generate the full batch JSONL file.
     
-    Creates 50 requests per question = 50,000 total requests.
+    Creates G requests per question.
     
     Args:
         dataset: DataFrame with questions (must have question_id and question columns).
@@ -62,8 +64,18 @@ def generate_batch_jsonl(
     Returns:
         Path to the generated JSONL file.
     """
+    import copy
     if config is None:
         config = load_config()
+    else:
+        base_config = load_config()
+        merged = copy.deepcopy(base_config)
+        for k, v in config.items():
+            if isinstance(v, dict) and k in merged and isinstance(merged[k], dict):
+                merged[k].update(v)
+            else:
+                merged[k] = v
+        config = merged
     
     if output_path is None:
         output_path = resolve_path(config["paths"]["batch_output"])
@@ -111,14 +123,16 @@ def validate_batch_file(
     
     Checks:
     - Valid JSONL format
-    - Exactly 50,000 lines
-    - Unique custom IDs
-    - Exactly 50 generations per question
-    - Same model ID for all requests
-    - No n > 1
-    - No streaming
-    - Required fields exist
-    - No accidental credentials
+    - Exactly sample_size * generations_per_question lines
+    - Unique custom IDs with format gsm8k_q{q_id:06d}_g{g_id:04d}
+    - Exactly sample_size distinct questions
+    - Generation IDs exactly 1..G per question
+    - Method POST, url /v1/chat/completions
+    - Identical generation params on all requests, equal to config params
+    - Exactly one prompt per question, with an identical instruction prefix
+    - Same model ID for all requests (and not placeholder)
+    - No n > 1, no streaming
+    - No "sk-..." token or SHESHNAG_API_KEY value in any line (no secret search in text)
     
     Args:
         batch_path: Path to the JSONL file.
@@ -127,32 +141,59 @@ def validate_batch_file(
     Returns:
         List of error messages. Empty list means validation passed.
     """
+    import copy
     if config is None:
         config = load_config()
+    else:
+        base_config = load_config()
+        merged = copy.deepcopy(base_config)
+        for k, v in config.items():
+            if isinstance(v, dict) and k in merged and isinstance(merged[k], dict):
+                merged[k].update(v)
+            else:
+                merged[k] = v
+        config = merged
     
     errors = []
     custom_ids = set()
-    question_counts = {}
+    question_gens = {}      # q_id -> set of g_ids
+    question_prompts = {}   # q_id -> prompt text
     model_ids = set()
     line_count = 0
     
-    expected_total = (
-        config["dataset"]["sample_size"]
-        * config["experiment"]["generations_per_question"]
-    )
+    expected_sample_size = config["dataset"]["sample_size"]
+    expected_gen = config["experiment"]["generations_per_question"]
+    expected_total = expected_sample_size * expected_gen
+    expected_gen_params = get_generation_params(config)
+    
+    # Get expected instruction prefix
+    template = load_prompt_template(config)
+    expected_instruction_prefix = template.split("{question}")[0]
+    
+    # Check for live SHESHNAG_API_KEY from environment
+    env_api_key = os.environ.get("SHESHNAG_API_KEY", "")
+    has_env_key = bool(env_api_key and "REPLACE" not in env_api_key and len(env_api_key) > 5)
+    
+    first_seen_params = None
     
     try:
         with open(batch_path, "r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
+                raw_line = line.strip()
+                if not raw_line:
                     continue
                 
                 line_count += 1
                 
+                # Check for "sk-..." token or SHESHNAG_API_KEY in line
+                if re.search(r'sk-[a-zA-Z0-9_\-]{8,}', raw_line):
+                    errors.append(f"Line {line_num}: Leaked API key token found ('sk-...')")
+                if has_env_key and env_api_key in raw_line:
+                    errors.append(f"Line {line_num}: Leaked SHESHNAG_API_KEY found in line")
+                
                 # Parse JSON
                 try:
-                    request = json.loads(line)
+                    request = json.loads(raw_line)
                 except json.JSONDecodeError as e:
                     errors.append(f"Line {line_num}: Invalid JSON - {e}")
                     continue
@@ -162,20 +203,41 @@ def validate_batch_file(
                     if field not in request:
                         errors.append(f"Line {line_num}: Missing field '{field}'")
                 
-                # Check custom_id uniqueness
+                # Check method and url
+                method = request.get("method")
+                if method != "POST":
+                    errors.append(f"Line {line_num}: Method is '{method}', expected 'POST'")
+                
+                url = request.get("url")
+                if url != "/v1/chat/completions":
+                    errors.append(f"Line {line_num}: URL is '{url}', expected '/v1/chat/completions'")
+                
+                # Check custom_id uniqueness & format
                 cid = request.get("custom_id", "")
+                if not cid:
+                    errors.append(f"Line {line_num}: Missing or empty custom_id")
+                    continue
+                
                 if cid in custom_ids:
                     errors.append(f"Line {line_num}: Duplicate custom_id '{cid}'")
                 custom_ids.add(cid)
                 
-                # Parse question ID from custom_id
-                import re
-                match = re.match(r'gsm8k_q(\d+)_g(\d+)', cid)
-                if match:
-                    q_id = match.group(1)
-                    question_counts[q_id] = question_counts.get(q_id, 0) + 1
+                match = re.match(r'^gsm8k_q(\d+)_g(\d+)$', cid)
+                if not match:
+                    errors.append(f"Line {line_num}: Invalid custom_id format '{cid}'")
+                    continue
+                
+                q_id = int(match.group(1))
+                g_id = int(match.group(2))
+                
+                if q_id not in question_gens:
+                    question_gens[q_id] = set()
+                question_gens[q_id].add(g_id)
                 
                 body = request.get("body", {})
+                if not isinstance(body, dict):
+                    errors.append(f"Line {line_num}: Request body is not a JSON object")
+                    continue
                 
                 # Check model
                 if "model" in body:
@@ -191,41 +253,76 @@ def validate_batch_file(
                 if body.get("stream", False):
                     errors.append(f"Line {line_num}: Uses streaming (not allowed)")
                 
-                # Check for credential leaks
-                line_lower = line.lower()
-                for keyword in ["api_key", "api-key", "bearer", "password", "secret"]:
-                    if keyword in line_lower and keyword not in ("custom_id",):
-                        # Exclude false positives in field names
-                        if keyword not in json.dumps(request.get("body", {}).get("messages", [])).lower():
-                            pass  # Only flag if in non-message content
+                # Check generation parameters
+                actual_params = {}
+                for k in expected_gen_params:
+                    if k in body:
+                        actual_params[k] = body[k]
+                
+                if actual_params != expected_gen_params:
+                    errors.append(
+                        f"Line {line_num}: Generation params {actual_params} do not match config {expected_gen_params}"
+                    )
+                
+                if first_seen_params is None:
+                    first_seen_params = actual_params
+                elif actual_params != first_seen_params:
+                    errors.append(
+                        f"Line {line_num}: Generation params not identical to previous requests"
+                    )
+                
+                # Check messages and prompt
+                messages = body.get("messages", [])
+                if not messages or not isinstance(messages, list):
+                    errors.append(f"Line {line_num}: Missing or invalid messages list")
+                else:
+                    user_content = messages[0].get("content", "") if isinstance(messages[0], dict) else ""
+                    # Check identical instruction prefix
+                    if not user_content.startswith(expected_instruction_prefix):
+                        errors.append(
+                            f"Line {line_num}: Prompt does not start with expected instruction prefix"
+                        )
+                    # Check exactly one prompt per question
+                    if q_id not in question_prompts:
+                        question_prompts[q_id] = user_content
+                    elif question_prompts[q_id] != user_content:
+                        errors.append(
+                            f"Line {line_num}: Question {q_id} has inconsistent prompt across generations"
+                        )
     
     except FileNotFoundError:
         errors.append(f"Batch file not found: {batch_path}")
         return errors
     
-    # Check total count
+    # Check total line count
     if line_count != expected_total:
         errors.append(
             f"Expected {expected_total} requests but found {line_count}"
         )
+    
+    # Check distinct questions
+    if len(question_prompts) != expected_sample_size:
+        errors.append(
+            f"Expected {expected_sample_size} distinct questions, found {len(question_prompts)}"
+        )
+    
+    # Check generation IDs exactly 1..G per question
+    expected_gens_set = set(range(1, expected_gen + 1))
+    for q_id, g_set in question_gens.items():
+        if g_set != expected_gens_set:
+            errors.append(
+                f"Question {q_id}: generation IDs {sorted(g_set)} != expected 1..{expected_gen}"
+            )
     
     # Check model consistency
     if len(model_ids) > 1:
         errors.append(f"Multiple model IDs found: {model_ids}")
     
     # Check placeholder model
-    if model_ids and any("REPLACE" in m for m in model_ids):
+    if model_ids and any("REPLACE" in str(m) for m in model_ids):
         errors.append(
             "Model ID still contains placeholder 'REPLACE'. "
             "Update SHESHNAG_MODEL_ID in .env before submission."
         )
-    
-    # Check generations per question
-    expected_gen = config["experiment"]["generations_per_question"]
-    for q_id, count in question_counts.items():
-        if count != expected_gen:
-            errors.append(
-                f"Question {q_id}: {count} generations (expected {expected_gen})"
-            )
     
     return errors

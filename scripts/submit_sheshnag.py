@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.inference_budget.config import load_config, load_env, get_sheshnag_config, resolve_path
+from src.inference_budget.batch import validate_batch_file
 from src.inference_budget.sheshnag import (
     create_client,
     list_models,
@@ -51,6 +52,35 @@ def cmd_submit(args):
     print(f"Verifying model '{model_id}'...")
     if not verify_model(model_id):
         print("ERROR: Model not available. Run --check-models to see available models.")
+        sys.exit(1)
+    
+    # Validate batch file before upload
+    print(f"Validating batch file: {batch_path}")
+    errors = validate_batch_file(batch_path, config)
+    if errors:
+        print(f"ERROR: Batch validation failed with {len(errors)} error(s):")
+        for err in errors:
+            print(f"  - {err}")
+        sys.exit(1)
+    
+    # Abort if the model in the batch file's first line != SHESHNAG_MODEL_ID
+    with open(batch_path, "r", encoding="utf-8") as f:
+        first_line = f.readline().strip()
+    if not first_line:
+        print("ERROR: Batch file is empty.")
+        sys.exit(1)
+    try:
+        first_req = json.loads(first_line)
+        batch_model = first_req.get("body", {}).get("model")
+    except Exception as e:
+        print(f"ERROR: Could not parse first line of batch file: {e}")
+        sys.exit(1)
+    
+    if batch_model != model_id:
+        print(
+            f"ERROR: Model mismatch! Model in batch file ('{batch_model}') "
+            f"!= SHESHNAG_MODEL_ID ('{model_id}')."
+        )
         sys.exit(1)
     
     # Upload

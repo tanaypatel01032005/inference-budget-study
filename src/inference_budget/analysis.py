@@ -65,6 +65,11 @@ def compute_marginal_gains(summary_df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with marginal gains.
     """
     sorted_df = summary_df.sort_values("N").reset_index(drop=True)
+    if len(sorted_df) < 2:
+        return pd.DataFrame(columns=[
+            "from_N", "to_N", "delta_accuracy",
+            "additional_generations", "accuracy_gain_per_generation"
+        ])
     
     gains = []
     for i in range(1, len(sorted_df)):
@@ -124,7 +129,7 @@ def create_accuracy_plot(
         )
     
     ax.set_xlabel("Number of Generations (N)", fontsize=13)
-    ax.set_ylabel("Accuracy (%)", fontsize=13)
+    ax.set_ylabel("Exact-Match Accuracy (%)", fontsize=13)
     ax.set_title(
         "Effect of Inference-Time Sampling on\nMathematical Reasoning Accuracy",
         fontsize=15, fontweight='bold',
@@ -161,10 +166,14 @@ def create_marginal_gain_plot(
     """
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    labels = [f"{int(r['from_N'])}->{int(r['to_N'])}" for _, r in gains_df.iterrows()]
-    deltas = gains_df["delta_accuracy"].values * 100  # percentage points
-    
-    colors = ['#4CAF50' if d > 0 else '#F44336' for d in deltas]
+    if len(gains_df) == 0:
+        labels = []
+        deltas = np.array([])
+        colors = []
+    else:
+        labels = [f"{int(r['from_N'])}->{int(r['to_N'])}" for _, r in gains_df.iterrows()]
+        deltas = gains_df["delta_accuracy"].values * 100  # percentage points
+        colors = ['#4CAF50' if d > 0 else '#F44336' for d in deltas]
     
     bars = ax.bar(labels, deltas, color=colors, edgecolor='white', linewidth=0.5)
     
@@ -217,8 +226,9 @@ def create_budget_tradeoff_plot(
     n_values = sorted_df["N"].values
     accuracies = sorted_df["accuracy"].values * 100
     
-    # Generation budget = N * 1000 questions
-    budgets = n_values * 1000
+    # Generation budget = N * total questions
+    total_questions = int(sorted_df["total"].iloc[0]) if "total" in sorted_df.columns and len(sorted_df) > 0 else 1000
+    budgets = n_values * total_questions
     
     if ci_data:
         ci_lower = np.array([ci_data[n][1] * 100 for n in n_values])
@@ -237,8 +247,8 @@ def create_budget_tradeoff_plot(
             label='Accuracy',
         )
     
-    ax.set_xlabel("Total Generation Budget (across 1,000 questions)", fontsize=13)
-    ax.set_ylabel("Accuracy (%)", fontsize=13)
+    ax.set_xlabel(f"Total Generation Budget (across {total_questions:,} questions)", fontsize=13)
+    ax.set_ylabel("Exact-Match Accuracy (%)", fontsize=13)
     ax.set_title(
         "Accuracy vs. Computational Budget\n(Quality-Cost Trade-off)",
         fontsize=15, fontweight='bold',
