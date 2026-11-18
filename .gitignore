@@ -40,6 +40,7 @@ Thumbs.db
 
 # pytest
 .pytest_cache/
+.pytest_temp/
 
 # Mock outputs
 results/mock/

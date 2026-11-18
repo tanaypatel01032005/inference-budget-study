@@ -129,6 +129,16 @@ def cmd_submit(args):
 
 def cmd_status(batch_id):
     """Check batch status."""
+    if batch_id == "LATEST":
+        batch_info_path = resolve_path("batch/results/batch_info.json")
+        if not batch_info_path.exists():
+            print("ERROR: No batch_info.json found to check status for.")
+            sys.exit(1)
+        with open(batch_info_path, "r", encoding="utf-8") as f:
+            batch_info = json.load(f)
+        batch_id = batch_info["batch_id"]
+        print(f"Using latest batch ID from batch_info.json: {batch_id}")
+
     client = create_client()
     batch = client.batches.retrieve(batch_id)
     print(f"Batch ID: {batch.id}")
@@ -150,9 +160,10 @@ def main():
     )
     parser.add_argument(
         "--status",
-        type=str,
+        nargs="?",
+        const="LATEST",
         default=None,
-        help="Check status of a batch by ID.",
+        help="Check status of a batch by ID. If passed without an ID, reads from batch_info.json.",
     )
     parser.add_argument(
         "--no-poll",
