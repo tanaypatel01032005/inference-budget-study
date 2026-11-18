@@ -3,19 +3,106 @@
 
 Usage:
     python scripts/submit_sheshnag.py [--no-poll] [--poll-interval 30]
+    python scripts/submit_sheshnag.py --batch-file batch/generated/pilot_batch.jsonl  # pilot
     python scripts/submit_sheshnag.py --check-models
     python scripts/submit_sheshnag.py --status BATCH_ID
 """
 
 import argparse
+import hashlib
 import json
+import platform
+import subprocess
 import sys
+from datetime import datetime, timezone
+from importlib import metadata
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.inference_budget.config import load_config, load_env, get_sheshnag_config, resolve_path
-from src.inference_budget.batch import validate_batch_file
+from src.inference_budget.batch import validate_batch_file, config_for_batch_file
+from src.inference_budget.config import get_generation_params
+from src.inference_budget.prompting import load_prompt_template
+
+PILOT_RESULTS_DIR = "results/pilot"
+
+
+def _git_commit():
+    try:
+        root = resolve_path(".")
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=root, text=True).strip())
+        return commit, dirty
+    except Exception:
+        return None, None
+
+
+def _sanitize_url(url):
+    """Drop any userinfo, query string and fragment from the base URL."""
+    parts = urlsplit(url)
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc += f":{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _repo_relative(path):
+    path, root = Path(path).resolve(), resolve_path(".").resolve()
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _pkg_version(name):
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def write_run_manifest(path, config, sheshnag_config, batch_id, file_id, batch_path, run_type):
+    """Write the run manifest. Never includes the API key."""
+    sha = hashlib.sha256()
+    with open(batch_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            sha.update(chunk)
+    commit, dirty = _git_commit()
+    manifest = {
+        "run_type": run_type,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "git_commit": commit,
+        "git_dirty": dirty,
+        "model_id": sheshnag_config["model_id"],
+        "base_url": _sanitize_url(sheshnag_config["base_url"]),
+        "batch_id": batch_id,
+        "file_id": file_id,
+        "batch_file": _repo_relative(batch_path),
+        "batch_file_sha256": sha.hexdigest(),
+        "sample_size": config["dataset"]["sample_size"],
+        "generations_per_question": config["experiment"]["generations_per_question"],
+        "prompt_template_path": config["paths"]["prompt_template"],
+        "prompt_text": load_prompt_template(config),
+        "generation_params": get_generation_params(config),
+        "dataset_seed": config["dataset"]["random_seed"],
+        "shuffle_seed": config["experiment"]["shuffle_seed"],
+        "bootstrap_seed": config["analysis"]["bootstrap_seed"],
+        "package_versions": {
+            p: _pkg_version(p) for p in ("pandas", "numpy", "openai", "datasets", "matplotlib")
+        },
+        "python_version": platform.python_version(),
+    }
+    serialized = json.dumps(manifest, indent=2)
+    if sheshnag_config.get("api_key") and sheshnag_config["api_key"] in serialized:
+        raise RuntimeError("Refusing to write manifest: it would contain the API key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(serialized + "\n")
+    print(f"Run manifest saved to: {path}")
 from src.inference_budget.sheshnag import (
     create_client,
     list_models,
@@ -41,11 +128,16 @@ def cmd_submit(args):
     config = load_config()
     sheshnag_config = get_sheshnag_config()
     
-    batch_path = resolve_path(config["paths"]["batch_output"])
+    full_batch_path = resolve_path(config["paths"]["batch_output"])
+    batch_path = Path(args.batch_file).resolve() if args.batch_file else full_batch_path
+    is_pilot = batch_path != full_batch_path.resolve()
+    if is_pilot:
+        print(f"PILOT run: results go to {PILOT_RESULTS_DIR}/ (never results/raw/)")
     if not batch_path.exists():
         print(f"ERROR: Batch file not found: {batch_path}")
         print("Run: python scripts/create_batch.py")
         sys.exit(1)
+    config = config_for_batch_file(batch_path, config)
     
     # Verify model
     model_id = sheshnag_config["model_id"]
@@ -92,7 +184,12 @@ def cmd_submit(args):
     batch_id = create_batch(file_id)
     
     # Save batch ID
-    batch_info_path = resolve_path("batch/results/batch_info.json")
+    if is_pilot:
+        batch_info_path = resolve_path(f"{PILOT_RESULTS_DIR}/batch_info.json")
+        manifest_path = resolve_path(f"{PILOT_RESULTS_DIR}/run_manifest.json")
+    else:
+        batch_info_path = resolve_path("batch/results/batch_info.json")
+        manifest_path = resolve_path("results/run_manifest.json")
     batch_info_path.parent.mkdir(parents=True, exist_ok=True)
     batch_info = {
         "batch_id": batch_id,
@@ -104,6 +201,8 @@ def cmd_submit(args):
         json.dump(batch_info, f, indent=2)
     print(f"\nBatch info saved to: {batch_info_path}")
     print(f"BATCH ID: {batch_id}")
+    write_run_manifest(manifest_path, config, sheshnag_config, batch_id, file_id,
+                       batch_path, "pilot" if is_pilot else "full")
     
     if args.no_poll:
         print("\nNot polling. Check status manually:")
@@ -118,7 +217,14 @@ def cmd_submit(args):
     
     if result["status"] == "completed":
         print("Downloading results...")
-        output_path = download_results(batch_id, config=config)
+        if is_pilot:
+            output_path = download_results(
+                batch_id,
+                output_path=resolve_path(f"{PILOT_RESULTS_DIR}/pilot_results.jsonl"),
+                config=config,
+            )
+        else:
+            output_path = download_results(batch_id, config=config)
         print(f"Results saved to: {output_path}")
         print("\nNext step: python scripts/evaluate.py")
     else:
@@ -164,6 +270,13 @@ def main():
         const="LATEST",
         default=None,
         help="Check status of a batch by ID. If passed without an ID, reads from batch_info.json.",
+    )
+    parser.add_argument(
+        "--batch-file",
+        type=str,
+        default=None,
+        help="Batch JSONL to submit (default: config paths.batch_output). "
+             "Any other file is treated as a pilot; results go to results/pilot/.",
     )
     parser.add_argument(
         "--no-poll",

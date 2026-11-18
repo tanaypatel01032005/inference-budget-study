@@ -4,6 +4,7 @@
 Usage:
     python scripts/download_results.py --batch-id BATCH_ID
     python scripts/download_results.py  # uses saved batch_info.json
+    python scripts/download_results.py --pilot  # pilot -> results/pilot/
 """
 
 import argparse
@@ -27,6 +28,11 @@ def main():
         default=None,
         help="Batch ID to download. If omitted, reads from batch_info.json.",
     )
+    parser.add_argument(
+        "--pilot",
+        action="store_true",
+        help="Download the pilot batch (results/pilot/batch_info.json) to results/pilot/.",
+    )
     args = parser.parse_args()
     
     config = load_config()
@@ -34,6 +40,21 @@ def main():
     get_sheshnag_config()  # Validate
     
     batch_id = args.batch_id
+    
+    # A pilot batch never goes to results/raw/: use --pilot, or pass the
+    # pilot's batch ID (matched against results/pilot/batch_info.json).
+    pilot_info_path = resolve_path("results/pilot/batch_info.json")
+    pilot_batch_id = None
+    if pilot_info_path.exists():
+        with open(pilot_info_path, "r", encoding="utf-8") as f:
+            pilot_batch_id = json.load(f).get("batch_id")
+    is_pilot = args.pilot or (batch_id is not None and batch_id == pilot_batch_id)
+    if args.pilot and not batch_id:
+        if not pilot_batch_id:
+            print("ERROR: --pilot given but no results/pilot/batch_info.json found.")
+            sys.exit(1)
+        batch_id = pilot_batch_id
+        print(f"Using pilot batch ID from {pilot_info_path}: {batch_id}")
     
     if not batch_id:
         batch_info_path = resolve_path("batch/results/batch_info.json")
@@ -46,7 +67,11 @@ def main():
         batch_id = batch_info["batch_id"]
         print(f"Using batch ID from batch_info.json: {batch_id}")
     
-    output_path = resolve_path(config["paths"]["results_raw"])
+    if is_pilot:
+        print("PILOT download: saving to results/pilot/ (never results/raw/)")
+        output_path = resolve_path("results/pilot/pilot_results.jsonl")
+    else:
+        output_path = resolve_path(config["paths"]["results_raw"])
     
     if output_path.exists():
         print(f"WARNING: Results file already exists at {output_path}")

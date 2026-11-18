@@ -116,3 +116,32 @@ class TestValidateBatchFile:
         assert any("n=" in e for e in errors)
         path.unlink()
 
+    def test_stray_body_key_rejected(self):
+        """A body key outside model/messages/config generation params must fail."""
+        from src.inference_budget.config import load_config, get_generation_params
+        config = {
+            "dataset": {"sample_size": 1},
+            "experiment": {"generations_per_question": 1},
+        }
+        gen_params = get_generation_params(load_config())
+        assert "seed" not in gen_params  # config seed is null
+
+        def write(extra):
+            req = self._make_valid_request(1, 1)
+            req["body"].update(gen_params)
+            req["body"].update(extra)
+            f = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
+            f.write(json.dumps(req) + "\n")
+            f.close()
+            return Path(f.name)
+
+        clean = write({})
+        assert not any("Unexpected body key" in e for e in validate_batch_file(clean, config))
+        clean.unlink()
+
+        for extra in ({"seed": 123}, {"frequency_penalty": 0.1}):
+            path = write(extra)
+            errors = validate_batch_file(path, config)
+            assert any("Unexpected body key" in e and list(extra)[0] in e for e in errors)
+            path.unlink()
+

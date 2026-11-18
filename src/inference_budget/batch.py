@@ -239,6 +239,15 @@ def validate_batch_file(
                     errors.append(f"Line {line_num}: Request body is not a JSON object")
                     continue
                 
+                # Reject any body key other than model, messages and config generation params
+                allowed_body_keys = {"model", "messages"} | set(expected_gen_params)
+                unexpected_keys = sorted(set(body) - allowed_body_keys)
+                if unexpected_keys:
+                    errors.append(
+                        f"Line {line_num}: Unexpected body key(s) {unexpected_keys} "
+                        f"(allowed: {sorted(allowed_body_keys)})"
+                    )
+
                 # Check model
                 if "model" in body:
                     model_ids.add(body["model"])
@@ -326,3 +335,28 @@ def validate_batch_file(
         )
     
     return errors
+
+
+def config_for_batch_file(batch_path: Path, config: Dict) -> Dict:
+    """Return the config to validate `batch_path` against.
+    
+    The configured full batch (paths.batch_output) is always validated against
+    the real config. Any other file (e.g. a pilot) gets a config copy whose
+    sample_size / generations_per_question are the number of distinct questions
+    and the highest generation id found in its custom_ids; validation then still
+    requires every question to have exactly generations 1..G.
+    """
+    import copy
+    if Path(batch_path).resolve() == resolve_path(config["paths"]["batch_output"]).resolve():
+        return config
+    q_ids, max_g = set(), 0
+    with open(batch_path, "r", encoding="utf-8") as f:
+        for line in f:
+            m = re.search(r'"custom_id":\s*"gsm8k_q(\d+)_g(\d+)"', line)
+            if m:
+                q_ids.add(int(m.group(1)))
+                max_g = max(max_g, int(m.group(2)))
+    cfg = copy.deepcopy(config)
+    cfg["dataset"]["sample_size"] = len(q_ids)
+    cfg["experiment"]["generations_per_question"] = max_g
+    return cfg

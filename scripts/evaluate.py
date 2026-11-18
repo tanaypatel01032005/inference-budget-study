@@ -17,6 +17,7 @@ from src.inference_budget.evaluation import (
     parse_sheshnag_results,
     run_evaluation,
     compute_accuracy,
+    IncompleteResultsError,
 )
 
 
@@ -74,9 +75,13 @@ def main():
     
     # Run evaluation
     print(f"\nRunning evaluation...")
-    wide_df, long_df = run_evaluation(
-        generations, dataset, config, allow_incomplete=args.allow_incomplete
-    )
+    try:
+        wide_df, long_df = run_evaluation(
+            generations, dataset, config, allow_incomplete=args.allow_incomplete
+        )
+    except IncompleteResultsError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
     
     # Save results
     final_path = resolve_path(config["paths"]["results_final"])

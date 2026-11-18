@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.inference_budget.config import load_config, resolve_path
-from src.inference_budget.batch import validate_batch_file
+from src.inference_budget.batch import validate_batch_file, config_for_batch_file
 
 
 def main():
@@ -40,6 +40,13 @@ def main():
         sys.exit(1)
     
     print(f"Validating: {batch_path}")
+    config = config_for_batch_file(batch_path, config)
+    if batch_path.resolve() != resolve_path(load_config()["paths"]["batch_output"]).resolve():
+        print(
+            f"NOTE: not the configured full batch; validating as "
+            f"{config['dataset']['sample_size']} questions x "
+            f"{config['experiment']['generations_per_question']} generations"
+        )
     print()
     
     errors = validate_batch_file(batch_path, config)
